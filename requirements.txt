@@ -1,0 +1,13 @@
+torch
+torchvision
+torchaudio
+ultralytics
+pyyaml
+wandb
+tqdm
+numpy
+opencv-python
+requests
+Pillow
+matplotlib
+scipy
