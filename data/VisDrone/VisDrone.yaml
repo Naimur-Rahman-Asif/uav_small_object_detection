@@ -1,0 +1,10 @@
+path: # Images and labels will be searched recursively
+train: data/VisDrone/train/images
+val: data/VisDrone/val/images
+test: data/VisDrone/test/images
+
+# Number of classes
+nc: 10
+
+# Class names (VisDrone dataset)
+names: ['pedestrian', 'people', 'bicycle', 'car', 'van', 'truck', 'tricycle', 'awning-tricycle', 'bus', 'motor']
