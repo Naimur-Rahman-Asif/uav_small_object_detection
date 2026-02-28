@@ -353,9 +353,9 @@ pip install --upgrade -r requirements.txt
 ```bibtex
 @inproceedings{VisDrone2021,
   title = {VisDrone-DET2021: The Vision Meets Drone Object Detection Challenge Results},
-  author = {Zhu, Pengfei and others},
-  booktitle = {ICCV},
-  year = {2021}
+  author = {Naimur Rahman; },
+  booktitle = {working on it},
+  year = {2026}
 }
 ```
 
@@ -386,3 +386,4 @@ For issues, questions, or contributions:
 **Last Updated**: February 2026
 **Python Version**: 3.9+
 **PyTorch Version**: 2.0+
+
