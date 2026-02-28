@@ -1,0 +1,28 @@
+# Hyperparameter configuration for training
+#
+# Loss scales
+hsv_h: 0.015  # HSV-Hue augmentation (fraction)
+hsv_s: 0.7    # HSV-Saturation augmentation (fraction)
+hsv_v: 0.4    # HSV-Value augmentation (fraction)
+degrees: 10.0 # Image rotation (+/- deg)
+translate: 0.1 # Image translation (+/- fraction)
+scale: 0.5    # Image scale (+/- fraction)
+flipud: 0.0   # Image flip up-down (probability)
+fliplr: 0.5   # Image flip left-right (probability)
+mosaic: 1.0   # Image mosaic (probability)
+mixup: 0.0    # Image mixup (probability)
+
+# Training hyperparameters
+anchor_t: 4.0     # Anchor-multiple threshold
+cls_pw: 0.5       # cls BCELoss positive_weight
+obj_pw: 1.0       # obj BCELoss positive_weight
+iou_t: 0.20       # IoU training threshold
+anchors: 3        # Number of anchors
+fl_gamma: 0.0     # Focal loss gamma (efficientDet default gamma=1.5)
+
+# Optimizer
+momentum: 0.937   # SGD momentum/Adam beta1
+weight_decay: 0.0005 # optimizer weight decay 5e-4
+warm_epochs: 3.0  # Warmup epochs
+warm_momentum: 0.8 # Warmup initial momentum
+warm_bias_lr: 0.1 # Warmup initial bias lr

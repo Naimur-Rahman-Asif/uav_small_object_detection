@@ -1,0 +1,13 @@
+batch_size: 2
+epochs: 100
+experiment_name: visdrone_small_objects
+grad_clip: 10.0
+lr: 0.0005
+mixed_precision: true
+model_scale: n
+num_classes: 10
+use_wandb: false
+val_interval: 5
+warmup_epochs: 10
+weight_decay: 0.0005
+gradient_accumulation_steps: 2
