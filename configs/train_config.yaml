@@ -11,3 +11,19 @@ val_interval: 5
 warmup_epochs: 10
 weight_decay: 0.0005
 gradient_accumulation_steps: 2
+
+model_options:
+  use_fpn_fusion: true
+  use_spatial_attention: true
+  use_deformable_branch: true
+
+loss:
+  num_scales: 3
+  scale_area_thresholds: [0.0025, 0.0225]
+  box_weight: 5.0
+  obj_weight: 1.0
+  cls_weight: 1.0
+  small_object_boost: 2.0
+  use_scale_adaptive_assignment: true
+  use_small_object_weighting: true
+  use_tiny_neighbor_supervision: true
