@@ -1,251 +1,381 @@
 # utils/metrics.py
 import numpy as np
 import torch
-from typing import List, Dict, Tuple
+from typing import Dict, List, Tuple, Optional
 
 
 def compute_iou(box1, box2):
+    """Compute IoU between two xyxy boxes."""
+    b1 = np.array(box1, dtype=np.float32)
+    b2 = np.array(box2, dtype=np.float32)
+
+    if b1.shape[0] < 4 or b2.shape[0] < 4:
+        return 0.0
+
+    if b1[2] < b1[0]:
+        b1[0], b1[2] = b1[2], b1[0]
+    if b1[3] < b1[1]:
+        b1[1], b1[3] = b1[3], b1[1]
+    if b2[2] < b2[0]:
+        b2[0], b2[2] = b2[2], b2[0]
+    if b2[3] < b2[1]:
+        b2[1], b2[3] = b2[3], b2[1]
+
+    x1 = max(b1[0], b2[0])
+    y1 = max(b1[1], b2[1])
+    x2 = min(b1[2], b2[2])
+    y2 = min(b1[3], b2[3])
+
+    inter_w = max(0.0, x2 - x1)
+    inter_h = max(0.0, y2 - y1)
+    inter = inter_w * inter_h
+
+    a1 = max(0.0, b1[2] - b1[0]) * max(0.0, b1[3] - b1[1])
+    a2 = max(0.0, b2[2] - b2[0]) * max(0.0, b2[3] - b2[1])
+    union = a1 + a2 - inter
+
+    if union <= 0:
+        return 0.0
+    return float(inter / union)
+
+
+def _to_python_nested_list(values):
+    if isinstance(values, torch.Tensor):
+        values = values.detach().cpu().numpy().tolist()
+    elif isinstance(values, np.ndarray):
+        values = values.tolist()
+    return values
+
+
+def _normalize_predictions(predictions):
     """
-    Compute Intersection over Union (IoU) between two boxes
-    
-    Args:
-        box1: [x1, y1, x2, y2]
-        box2: [x1, y1, x2, y2]
-    
-    Returns:
-        IoU value
+    Normalize predictions to per-image structure:
+    List[List[[x1,y1,x2,y2,conf,cls]]]
     """
-    box1 = np.array(box1, dtype=np.float32)
-    box2 = np.array(box2, dtype=np.float32)
-    
-    # Ensure we have valid boxes
-    if len(box1) < 4 or len(box2) < 4:
-        return 0.0
-    
-    # Ensure coordinates are in correct format
-    if box1[2] < box1[0]:
-        box1[0], box1[2] = box1[2], box1[0]
-    if box1[3] < box1[1]:
-        box1[1], box1[3] = box1[3], box1[1]
-    if box2[2] < box2[0]:
-        box2[0], box2[2] = box2[2], box2[0]
-    if box2[3] < box2[1]:
-        box2[1], box2[3] = box2[3], box2[1]
-    
-    # Calculate area of intersection
-    x_left = max(box1[0], box2[0])
-    x_right = min(box1[2], box2[2])
-    y_top = max(box1[1], box2[1])
-    y_bottom = min(box1[3], box2[3])
-    
-    if x_right < x_left or y_bottom < y_top:
-        return 0.0
-    
-    intersection_area = (x_right - x_left) * (y_bottom - y_top)
-    
-    # Calculate area of union
-    box1_area = (box1[2] - box1[0]) * (box1[3] - box1[1])
-    box2_area = (box2[2] - box2[0]) * (box2[3] - box2[1])
-    union_area = box1_area + box2_area - intersection_area
-    
-    if union_area == 0:
-        return 0.0
-    
-    return intersection_area / union_area
+    predictions = _to_python_nested_list(predictions)
+    if predictions is None:
+        return []
+
+    if len(predictions) == 0:
+        return []
+
+    # If already per-image list
+    if isinstance(predictions[0], list):
+        if len(predictions[0]) == 0:
+            return predictions
+        if isinstance(predictions[0][0], (list, tuple)):
+            return predictions
+
+    # Flat list case -> single image
+    return [predictions]
+
+
+def _normalize_ground_truths(ground_truths):
+    """
+    Normalize GT to per-image structure:
+    List[List[[x1,y1,x2,y2,cls]]]
+    """
+    ground_truths = _to_python_nested_list(ground_truths)
+    if ground_truths is None:
+        return []
+
+    if len(ground_truths) == 0:
+        return []
+
+    if isinstance(ground_truths[0], list):
+        if len(ground_truths[0]) == 0:
+            return ground_truths
+        if isinstance(ground_truths[0][0], (list, tuple)):
+            return ground_truths
+
+    return [ground_truths]
+
+
+def _clip_box01(box):
+    x1, y1, x2, y2 = box
+    x1 = float(min(1.0, max(0.0, x1)))
+    y1 = float(min(1.0, max(0.0, y1)))
+    x2 = float(min(1.0, max(0.0, x2)))
+    y2 = float(min(1.0, max(0.0, y2)))
+    if x2 < x1:
+        x1, x2 = x2, x1
+    if y2 < y1:
+        y1, y2 = y2, y1
+    return [x1, y1, x2, y2]
+
+
+def _box_area(box):
+    return max(0.0, box[2] - box[0]) * max(0.0, box[3] - box[1])
+
+
+def _interpolated_ap(recalls: np.ndarray, precisions: np.ndarray) -> float:
+    """Continuous interpolation AP as in COCO/VOC style integration."""
+    mrec = np.concatenate(([0.0], recalls, [1.0]))
+    mpre = np.concatenate(([0.0], precisions, [0.0]))
+
+    for i in range(len(mpre) - 1, 0, -1):
+        mpre[i - 1] = max(mpre[i - 1], mpre[i])
+
+    idx = np.where(mrec[1:] != mrec[:-1])[0]
+    ap = np.sum((mrec[idx + 1] - mrec[idx]) * mpre[idx + 1])
+    return float(ap)
+
+
+def _collect_class_data(predictions, ground_truths, class_id, area_range: Optional[Tuple[float, float]] = None):
+    """
+    Gather class-specific predictions and GTs across dataset.
+    area_range: (min_area, max_area) in normalized-area units.
+    """
+    class_preds = []  # (img_id, conf, box)
+    class_gts = {}    # img_id -> List[box]
+
+    min_a, max_a = (None, None)
+    if area_range is not None:
+        min_a, max_a = area_range
+
+    num_images = min(len(predictions), len(ground_truths))
+
+    for img_id in range(num_images):
+        preds_img = predictions[img_id] or []
+        gts_img = ground_truths[img_id] or []
+
+        class_gts[img_id] = []
+
+        for gt in gts_img:
+            if len(gt) < 5:
+                continue
+            gt_cls = int(gt[4])
+            if gt_cls != class_id:
+                continue
+            box = _clip_box01(gt[:4])
+            area = _box_area(box)
+            if min_a is not None and area < min_a:
+                continue
+            if max_a is not None and area >= max_a:
+                continue
+            class_gts[img_id].append(box)
+
+        for pred in preds_img:
+            if len(pred) < 6:
+                continue
+            pred_cls = int(pred[5])
+            if pred_cls != class_id:
+                continue
+            box = _clip_box01(pred[:4])
+            conf = float(pred[4])
+            area = _box_area(box)
+            if min_a is not None and area < min_a:
+                continue
+            if max_a is not None and area >= max_a:
+                continue
+            class_preds.append((img_id, conf, box))
+
+    return class_preds, class_gts
+
+
+def _evaluate_class_at_iou(class_preds, class_gts, iou_thr: float):
+    """Evaluate one class at one IoU threshold."""
+    num_gt = sum(len(v) for v in class_gts.values())
+    if num_gt == 0:
+        return 0.0, 0.0, 0.0, 0, 0, 0
+
+    if len(class_preds) == 0:
+        return 0.0, 0.0, 0.0, 0, 0, num_gt
+
+    class_preds = sorted(class_preds, key=lambda x: x[1], reverse=True)
+
+    matched = {img_id: np.zeros(len(gts), dtype=bool) for img_id, gts in class_gts.items()}
+    tp = np.zeros(len(class_preds), dtype=np.float32)
+    fp = np.zeros(len(class_preds), dtype=np.float32)
+
+    for idx, (img_id, _, pbox) in enumerate(class_preds):
+        gts = class_gts.get(img_id, [])
+        if len(gts) == 0:
+            fp[idx] = 1.0
+            continue
+
+        ious = np.array([compute_iou(pbox, gt) for gt in gts], dtype=np.float32)
+        best_gt_idx = int(np.argmax(ious))
+        best_iou = float(ious[best_gt_idx])
+
+        if best_iou >= iou_thr and not matched[img_id][best_gt_idx]:
+            tp[idx] = 1.0
+            matched[img_id][best_gt_idx] = True
+        else:
+            fp[idx] = 1.0
+
+    cum_tp = np.cumsum(tp)
+    cum_fp = np.cumsum(fp)
+
+    recalls = cum_tp / max(float(num_gt), 1e-12)
+    precisions = cum_tp / np.maximum(cum_tp + cum_fp, 1e-12)
+
+    ap = _interpolated_ap(recalls, precisions)
+    precision = float(precisions[-1]) if len(precisions) > 0 else 0.0
+    recall = float(recalls[-1]) if len(recalls) > 0 else 0.0
+
+    tp_total = int(cum_tp[-1]) if len(cum_tp) > 0 else 0
+    fp_total = int(cum_fp[-1]) if len(cum_fp) > 0 else 0
+    fn_total = max(0, num_gt - tp_total)
+
+    return ap, precision, recall, tp_total, fp_total, fn_total
 
 
 def evaluate_map(predictions, ground_truths, iou_threshold=0.5, num_classes=None):
     """
-    Evaluate Mean Average Precision (mAP) metric
-    
-    Args:
-        predictions: List of predicted bounding boxes [x1, y1, x2, y2, conf, class]
-        ground_truths: List of ground truth bounding boxes [x1, y1, x2, y2, class]
-        iou_threshold: IoU threshold for matching
-        num_classes: Number of classes
-    
-    Returns:
-        Dictionary with mAP metrics
+    COCO-style evaluation summary with AP50, AP50:95 and AP_S.
+    Inputs are expected per-image:
+      predictions: [[x1,y1,x2,y2,conf,cls], ...] per image
+      ground_truths: [[x1,y1,x2,y2,cls], ...] per image
     """
-    if not predictions or not ground_truths:
+    predictions = _normalize_predictions(predictions)
+    ground_truths = _normalize_ground_truths(ground_truths)
+
+    if len(predictions) == 0 or len(ground_truths) == 0:
         return {
             'map_50': 0.0,
             'map_50_95': 0.0,
+            'ap_small': 0.0,
             'precision': 0.0,
-            'recall': 0.0
+            'recall': 0.0,
+            'tp': 0,
+            'fp': 0,
+            'fn': 0,
+            'per_class_ap50': {}
         }
-    
-    # Convert to numpy if needed
-    if isinstance(predictions, torch.Tensor):
-        predictions = predictions.cpu().numpy()
-    if isinstance(ground_truths, torch.Tensor):
-        ground_truths = ground_truths.cpu().numpy()
-    
-    # Handle list of lists/tensors
-    if predictions and isinstance(predictions[0], (list, tuple)):
-        predictions = [item for sublist in predictions for item in sublist]
-    if ground_truths and isinstance(ground_truths[0], (list, tuple)):
-        ground_truths = [item for sublist in ground_truths for item in sublist]
-    
-    # Convert to array
-    if not isinstance(predictions, np.ndarray):
-        predictions = np.array(predictions) if predictions else np.array([])
-    if not isinstance(ground_truths, np.ndarray):
-        ground_truths = np.array(ground_truths) if ground_truths else np.array([])
-    
-    # Handle empty cases
-    if predictions.size == 0 or ground_truths.size == 0:
+
+    # Ensure equal number of images
+    n_img = min(len(predictions), len(ground_truths))
+    predictions = predictions[:n_img]
+    ground_truths = ground_truths[:n_img]
+
+    if num_classes is None:
+        class_ids = set()
+        for gts in ground_truths:
+            for gt in (gts or []):
+                if len(gt) >= 5:
+                    class_ids.add(int(gt[4]))
+        if len(class_ids) == 0:
+            class_ids = {0}
+        num_classes = max(class_ids) + 1
+
+    iou_thresholds = np.arange(0.5, 0.96, 0.05)
+    class_range = list(range(num_classes))
+
+    ap_by_iou = []
+    ap50_per_class = {}
+    total_tp = total_fp = total_fn = 0
+
+    # Small object range in normalized area (COCO small proxy at 640 resolution)
+    # (32 / 640)^2
+    small_max_area = (32.0 / 640.0) ** 2
+    aps_small = []
+
+    for cls in class_range:
+        class_preds, class_gts = _collect_class_data(predictions, ground_truths, cls)
+
+        if sum(len(v) for v in class_gts.values()) == 0:
+            continue
+
+        class_aps = []
+        for iou_thr in iou_thresholds:
+            ap, p, r, tp, fp, fn = _evaluate_class_at_iou(class_preds, class_gts, float(iou_thr))
+            class_aps.append(ap)
+
+            if abs(iou_thr - 0.5) < 1e-9:
+                ap50_per_class[cls] = ap
+                total_tp += tp
+                total_fp += fp
+                total_fn += fn
+
+        ap_by_iou.append(class_aps)
+
+        # AP_small per class at IoU=0.5:0.95
+        s_preds, s_gts = _collect_class_data(
+            predictions,
+            ground_truths,
+            cls,
+            area_range=(0.0, small_max_area),
+        )
+        if sum(len(v) for v in s_gts.values()) > 0:
+            small_class_aps = []
+            for iou_thr in iou_thresholds:
+                ap_s, _, _, _, _, _ = _evaluate_class_at_iou(s_preds, s_gts, float(iou_thr))
+                small_class_aps.append(ap_s)
+            aps_small.append(float(np.mean(small_class_aps)))
+
+    if len(ap_by_iou) == 0:
         return {
             'map_50': 0.0,
             'map_50_95': 0.0,
+            'ap_small': 0.0,
             'precision': 0.0,
-            'recall': 0.0
+            'recall': 0.0,
+            'tp': 0,
+            'fp': 0,
+            'fn': 0,
+            'per_class_ap50': {}
         }
-    
-    # Ensure predictions have at least 5 elements: [x1, y1, x2, y2, conf]
-    if predictions.ndim == 1:
-        predictions = predictions.reshape(1, -1)
-    if predictions.shape[1] < 5:
-        # Pad predictions if needed
-        num_boxes = predictions.shape[0]
-        padded = np.ones((num_boxes, 6))
-        padded[:, :predictions.shape[1]] = predictions
-        predictions = padded
-    
-    # Ensure ground truths have format [x1, y1, x2, y2, ...]
-    if ground_truths.ndim == 1:
-        ground_truths = ground_truths.reshape(1, -1)
-    
-    # Calculate IoU between all predictions and ground truths
-    if len(predictions) > 0 and len(ground_truths) > 0:
-        tp = 0
-        fp = 0
-        
-        # For each prediction, find best matching ground truth
-        matched_gt = set()
-        
-        # Sort by confidence
-        if predictions.shape[1] >= 5:
-            sorted_indices = np.argsort(-predictions[:, 4])  # Sort by confidence
-            predictions = predictions[sorted_indices]
-        
-        for pred in predictions:
-            best_iou = 0
-            best_gt_idx = -1
-            
-            for gt_idx, gt in enumerate(ground_truths):
-                if gt_idx in matched_gt:
-                    continue
-                
-                iou = compute_iou(pred[:4], gt[:4])
-                
-                if iou > best_iou:
-                    best_iou = iou
-                    best_gt_idx = gt_idx
-            
-            if best_iou >= iou_threshold and best_gt_idx >= 0:
-                tp += 1
-                matched_gt.add(best_gt_idx)
-            else:
-                fp += 1
-        
-        fn = len(ground_truths) - len(matched_gt)
-        
-        # Calculate metrics
-        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-        
-        # Approximate mAP (simplified)
-        map_50_95 = precision * recall
-        map_50 = precision * recall
-    else:
-        tp = fp = fn = 0
-        precision = recall = map_50_95 = map_50 = 0.0
-    
+
+    ap_by_iou = np.array(ap_by_iou, dtype=np.float32)  # [num_cls_valid, num_iou]
+    map_50 = float(np.mean(ap_by_iou[:, 0]))
+    map_50_95 = float(np.mean(ap_by_iou))
+
+    precision = float(total_tp / (total_tp + total_fp)) if (total_tp + total_fp) > 0 else 0.0
+    recall = float(total_tp / (total_tp + total_fn)) if (total_tp + total_fn) > 0 else 0.0
+
+    ap_small = float(np.mean(aps_small)) if len(aps_small) > 0 else 0.0
+
     return {
-        'map_50': float(map_50),
-        'map_50_95': float(map_50_95),
-        'precision': float(precision),
-        'recall': float(recall),
-        'tp': int(tp),
-        'fp': int(fp),
-        'fn': int(fn)
+        'map_50': map_50,
+        'map_50_95': map_50_95,
+        'ap_small': ap_small,
+        'precision': precision,
+        'recall': recall,
+        'tp': int(total_tp),
+        'fp': int(total_fp),
+        'fn': int(total_fn),
+        'per_class_ap50': ap50_per_class,
     }
 
 
 def compute_F1(precision, recall):
-    """Compute F1 score"""
+    """Compute F1 score."""
     if precision + recall == 0:
         return 0.0
     return 2 * (precision * recall) / (precision + recall)
 
 
 class MetricsCalculator:
-    """Advanced metrics calculation for object detection"""
-    
+    """Lightweight wrapper around evaluate_map for compatibility."""
+
     def __init__(self, num_classes=10):
         self.num_classes = num_classes
         self.reset()
-    
+
     def reset(self):
-        """Reset metrics"""
-        self.tp = np.zeros(self.num_classes)
-        self.fp = np.zeros(self.num_classes)
-        self.fn = np.zeros(self.num_classes)
-    
+        self.predictions = []
+        self.ground_truths = []
+
     def update(self, predictions, ground_truths, iou_threshold=0.5):
-        """Update metrics with batch"""
-        if len(predictions) == 0 or len(ground_truths) == 0:
-            return
-        
-        for pred, gt in zip(predictions, ground_truths):
-            if len(pred) == 0:
-                self.fn += np.ones(self.num_classes)
-                continue
-            
-            matched_gt = set()
-            
-            for p in pred:
-                best_iou = 0
-                best_gt_idx = -1
-                
-                for gt_idx, g in enumerate(gt):
-                    if gt_idx in matched_gt:
-                        continue
-                    
-                    iou = compute_iou(p[:4], g[:4])
-                    
-                    if iou > best_iou:
-                        best_iou = iou
-                        best_gt_idx = gt_idx
-                
-                pred_class = int(p[-1]) if len(p) > 5 else 0
-                
-                if best_iou >= iou_threshold and best_gt_idx >= 0:
-                    self.tp[pred_class] += 1
-                    matched_gt.add(best_gt_idx)
-                else:
-                    self.fp[pred_class] += 1
-            
-            # Count false negatives
-            for gt_idx in range(len(gt)):
-                if gt_idx not in matched_gt:
-                    gt_class = int(gt[gt_idx][-1]) if len(gt[gt_idx]) > 4 else 0
-                    self.fn[gt_class] += 1
-    
+        self.predictions.extend(_normalize_predictions(predictions))
+        self.ground_truths.extend(_normalize_ground_truths(ground_truths))
+
     def compute_metrics(self):
-        """Compute precision, recall, and mAP"""
-        precision = self.tp / (self.tp + self.fp + 1e-6)
-        recall = self.tp / (self.tp + self.fn + 1e-6)
-        f1 = 2 * (precision * recall) / (precision + recall + 1e-6)
-        
-        map_score = np.mean(precision * recall)
-        
+        metrics = evaluate_map(
+            self.predictions,
+            self.ground_truths,
+            iou_threshold=0.5,
+            num_classes=self.num_classes,
+        )
+        f1 = compute_F1(metrics['precision'], metrics['recall'])
+
         return {
-            'precision': precision.mean(),
-            'recall': recall.mean(),
-            'f1': f1.mean(),
-            'mAP': map_score,
-            'precision_per_class': precision,
-            'recall_per_class': recall
+            'precision': metrics['precision'],
+            'recall': metrics['recall'],
+            'f1': f1,
+            'mAP': metrics['map_50_95'],
+            'map_50': metrics['map_50'],
+            'ap_small': metrics.get('ap_small', 0.0),
+            'per_class_ap50': metrics.get('per_class_ap50', {}),
         }
