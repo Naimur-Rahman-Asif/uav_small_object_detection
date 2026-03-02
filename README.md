@@ -27,8 +27,9 @@ Research-oriented project for detecting small objects in UAV (drone) imagery usi
 
 ```
 ├── configs/                 # Configuration files
-│   ├── train_config.yaml   # Training configuration
-│   └── yolov8_custom.yaml  # Model configuration
+│   ├── train_config.yaml          # Local/default training configuration
+│   ├── train_config_cloud.yaml    # Colab/cloud training configuration
+│   └── yolov8_custom.yaml         # Reference YOLO config
 ├── data/                    # Dataset directory
 │   ├── VisDrone.yaml       # Dataset manifest
 │   └── scripts/             # data-related scripts (downloader removed)
@@ -36,7 +37,9 @@ Research-oriented project for detecting small objects in UAV (drone) imagery usi
 │   ├── train.py            # Training script
 │   ├── test.py             # Testing script
 │   ├── validate.py         # Validation script
-│   └── comparison.py       # Model comparison
+│   ├── comparison.py       # Metrics aggregation + plots
+│   ├── ablation.py         # Ablation runner
+│   └── ablation_table.py   # Journal-ready ablation table
 ├── models/                  # Model architecture
 │   ├── yolov8_enhanced.py  # Main model
 │   └── modules/            # Custom modules
@@ -52,7 +55,10 @@ Research-oriented project for detecting small objects in UAV (drone) imagery usi
 ├── requirements.txt        # Python dependencies
 ├── setup.bat              # Windows setup script
 ├── main.py                # Entry point
-└── README.md              # This file
+├── REPRODUCIBILITY_CHECKLIST.md   # Submission checklist
+└── scripts/
+   ├── post_train_pipeline.py     # One-command post-training pipeline
+   └── post_train_pipeline.ipynb  # Notebook version of post-training pipeline
 ```
 
 ## Installation
@@ -141,17 +147,13 @@ If you already have the dataset downloaded, ensure it matches the structure abov
 
 ```bash
 # From project root
-cd experiments
-python train.py
-
-# OR from project root
 python main.py train --config configs/train_config.yaml
 ```
 
 **Training Configuration** (configs/train_config.yaml):
-- Batch Size: 16
-- Epochs: 300
-- Learning Rate: 0.001
+- Batch Size: 2
+- Epochs: 100
+- Learning Rate: 0.0005
 - Mixed Precision: Enabled
 - Validation Interval: Every 5 epochs
 
@@ -167,8 +169,7 @@ python main.py infer --model weights/best_model.pth --image path/to/image.jpg
 ### 4. Validate Results
 
 ```bash
-cd experiments
-python validate.py
+python main.py validate --model weights/best_model.pth --config configs/train_config.yaml
 ```
 
 ## Detailed Usage
@@ -176,8 +177,7 @@ python validate.py
 ### Training
 
 ```bash
-cd experiments
-python train.py
+python main.py train --config configs/train_config.yaml --device cuda
 ```
 
 **Expected Output:**
@@ -218,19 +218,67 @@ for bbox, conf, cls in predictions:
 ### Train Config (configs/train_config.yaml)
 
 ```yaml
-batch_size: 16           # Batch size for training
-epochs: 300              # Number of training epochs
+batch_size: 2            # Batch size for training
+epochs: 100              # Number of training epochs
 experiment_name: visdrone_small_objects  # Experiment name
 grad_clip: 10.0          # Gradient clipping value
-lr: 0.001                # Learning rate
+lr: 0.0005               # Learning rate
 mixed_precision: true    # Enable mixed precision training
-model_scale: l           # Model scale (n/s/m/l/x)
+model_scale: n           # Model scale (n/s/m/l/x)
 num_classes: 10          # Number of VisDrone classes
-use_wandb: true          # Use Weights & Biases
+use_wandb: false         # Use Weights & Biases
 val_interval: 5          # Validation interval (epochs)
 warmup_epochs: 10        # Warmup epochs
 weight_decay: 0.0005     # Weight decay
+gradient_accumulation_steps: 2
+
+model_options:
+   use_fpn_fusion: true
+   use_spatial_attention: true
+   use_deformable_branch: true
+
+loss:
+   use_scale_adaptive_assignment: true
+   use_small_object_weighting: true
+   use_tiny_neighbor_supervision: true
 ```
+
+## Post-Training Workflow
+
+After training completes, run one of the following:
+
+### Option A: Single command (recommended)
+
+```bash
+python scripts/post_train_pipeline.py --model weights/best_model.pth --config configs/train_config_cloud.yaml --device cuda
+```
+
+### Option B: Step-by-step commands
+
+```bash
+python main.py validate --model weights/best_model.pth --config configs/train_config_cloud.yaml --device cuda
+python main.py test --model weights/best_model.pth --config configs/train_config_cloud.yaml --device cuda
+python main.py infer --model weights/best_model.pth --image data/VisDrone/test/images/0000006_00159_d_0000001.jpg --device cuda
+python main.py compare --input results/runs --output results
+python main.py ablation-table --input results/runs --output results
+```
+
+## Experiment Pipeline (Ablation + Comparison)
+
+Run ablation experiments:
+
+```bash
+python main.py ablation --base-config configs/train_config_cloud.yaml --epochs 50
+```
+
+Aggregate all runs:
+
+```bash
+python main.py compare --input results/runs --output results
+python main.py ablation-table --input results/runs --output results
+```
+
+Outputs are saved under `results/` (CSV, LaTeX tables, plots).
 
 ### Model Scales
 
@@ -330,14 +378,24 @@ pip install --upgrade -r requirements.txt
 - Small Object mAP: 15-25%
 - Inference Speed: 30-50 FPS (on RTX 3080)
 
+## Time Estimate (Google Colab)
+
+- One run (100 epochs, `model_scale=n`, `img_size=512`): ~2.5 to 6 hours on T4
+- Post-train validation/test/reporting: ~10 to 30 minutes
+- Full ablation (4 variants × 3 seeds): ~30 to 78 GPU-hours
+
 ## Model Architecture
 
 ### Backbone
 - Enhanced CSP-style backbone with high-resolution branch
 - High-resolution branch for small object features
 - Dilated convolutions for larger receptive fields
+- Optional deformable branch integration (config-toggle)
 
-> Note: `models/modules/` contains additional experimental modules (e.g., deformable/attention) that can be integrated for further ablation studies.
+### Configurable Architecture Toggles
+- Multi-scale fusion toggle
+- Spatial attention toggle
+- Deformable branch toggle
 
 ### Neck (FPN)
 - Multi-scale feature pyramid
@@ -385,6 +443,6 @@ For issues, questions, or contributions:
 
 ---
 
-**Last Updated**: February 2026
+**Last Updated**: March 2026
 **Python Version**: 3.9+
 **PyTorch Version**: 2.0+
