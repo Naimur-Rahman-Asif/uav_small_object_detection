@@ -58,6 +58,34 @@ Examples:
     
     # Comparison command
     comp_parser = subparsers.add_parser('compare', help='Compare models')
+    comp_parser.add_argument('--input', type=str, default='results/runs',
+                             help='Directory containing run JSON files')
+    comp_parser.add_argument('--output', type=str, default='results',
+                             help='Directory to save comparison outputs')
+    comp_parser.add_argument('--metric', type=str, default='map_50_95',
+                             help='Metric name for statistical report')
+    comp_parser.add_argument('--baseline', type=str, default=None,
+                             help='Baseline model name for delta analysis')
+
+    # Ablation command
+    abl_parser = subparsers.add_parser('ablation', help='Run ablation variants')
+    abl_parser.add_argument('--base-config', type=str, default='configs/train_config.yaml',
+                            help='Base training config for ablation variants')
+    abl_parser.add_argument('--epochs', type=int, default=None,
+                            help='Override epochs for all variants')
+    abl_parser.add_argument('--only', type=str, default=None,
+                            help='Run one variant only: baseline|plus_scale_assign|plus_tiny_weighting|full_method')
+    abl_parser.add_argument('--out-dir', type=str, default='configs/generated_ablation',
+                            help='Directory to write generated ablation configs')
+
+    # Ablation table command
+    ablt_parser = subparsers.add_parser('ablation-table', help='Generate journal-ready ablation table')
+    ablt_parser.add_argument('--input', type=str, default='results/runs',
+                             help='Directory containing run JSON files')
+    ablt_parser.add_argument('--output', type=str, default='results',
+                             help='Directory to save ablation table outputs')
+    ablt_parser.add_argument('--baseline', type=str, default='YOLOv8-SAD-baseline',
+                             help='Baseline model label for delta column')
     
     args = parser.parse_args()
     
@@ -70,7 +98,7 @@ Examples:
         from experiments.dataset import VisDroneDataset
         from torch.utils.data import DataLoader
 
-        trainer = UAVTrainer(args.config)
+        trainer = UAVTrainer(args.config, device_override=args.device)
 
         # Prepare datasets and dataloaders using trainer config
         data_root = Path('..') / 'data' if not Path('data').exists() else Path('data')
@@ -195,7 +223,69 @@ Examples:
             print("Error: No validation data available. Ensure data/VisDrone/val is populated.")
     
     elif args.command == 'compare':
-        print("Model comparison is a placeholder. Use experiments/comparison.py directly for custom comparisons.")
+        print("Running model comparison...")
+        from experiments.comparison import ModelComparator
+
+        comparator = ModelComparator(input_dir=args.input, output_dir=args.output)
+        summary = comparator.aggregate()
+        plot_path = comparator.plot_comparison()
+        _, stats_path = comparator.statistical_analysis(metric=args.metric, baseline_model=args.baseline)
+
+        print("\nComparison complete:")
+        print(f"Summary CSV: {Path(args.output) / 'model_comparison.csv'}")
+        print(f"LaTeX table: {Path(args.output) / 'comparison_table.tex'}")
+        print(f"Plot: {plot_path}")
+        print(f"Stats: {stats_path}")
+
+        if len(summary) > 0:
+            best = summary.iloc[0]
+            print(f"Best model by mAP@0.5:0.95: {best['model']} ({best['map_50_95_mean']:.4f})")
+
+    elif args.command == 'ablation':
+        print("Running ablation study...")
+        from experiments.ablation import build_variants, load_yaml, save_yaml, run_variant
+        import copy
+
+        base_path = Path(args.base_config)
+        base_cfg = load_yaml(base_path)
+        variants = build_variants(base_cfg)
+
+        selected = [args.only] if args.only else list(variants.keys())
+        out_dir = Path(args.out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        config_paths = []
+        for name in selected:
+            if name not in variants:
+                raise ValueError(f"Unknown variant: {name}")
+            cfg = copy.deepcopy(variants[name])
+            if args.epochs is not None:
+                cfg['epochs'] = int(args.epochs)
+            cfg_path = out_dir / f"{name}.yaml"
+            save_yaml(cfg_path, cfg)
+            config_paths.append(cfg_path)
+
+        for cfg_path in config_paths:
+            run_variant(cfg_path)
+
+        print("Ablation complete. Aggregate with:")
+        print("python main.py compare --input results/runs --output results")
+
+    elif args.command == 'ablation-table':
+        print("Generating ablation table...")
+        from experiments.ablation_table import build_ablation_table
+
+        table_df, csv_path, tex_path = build_ablation_table(
+            input_dir=args.input,
+            output_dir=args.output,
+            baseline=args.baseline,
+        )
+
+        print("Ablation table generated:")
+        print(f"CSV: {csv_path}")
+        print(f"LaTeX: {tex_path}")
+        if len(table_df) > 0:
+            print(table_df[['Method', 'mAP50_95', 'Delta_mAP50_95']].to_string(index=False))
     
     else:
         # If no command provided, show help

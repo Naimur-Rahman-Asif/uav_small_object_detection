@@ -1,6 +1,6 @@
 # UAV Small Object Detection - YOLOv8 Enhanced
 
-Advanced deep learning project for detecting small objects in UAV (drone) imagery using an enhanced YOLOv8 architecture optimized for the VisDrone dataset.
+Research-oriented project for detecting small objects in UAV (drone) imagery using a YOLOv8-inspired enhanced architecture and evaluation pipeline on VisDrone.
 
 ## 🚀 Quick Start Options
 
@@ -15,8 +15,8 @@ Advanced deep learning project for detecting small objects in UAV (drone) imager
 
 ## Features
 
-- **Enhanced YOLOv8 Architecture**: Lightweight model optimized for small objects
-- **Small Object Focus**: Specialized detection head for small object optimization
+- **Enhanced YOLOv8-style Architecture**: Lightweight detector tailored for small-object experiments
+- **Small Object Focus**: Specialized detection head and scale-adaptive training loss
 - **VisDrone Dataset**: Support for 10 classes from the VisDrone UAV dataset
 - **Advanced Augmentation**: Mosaic, mixup, and geometric transformations
 - **Mixed Precision Training**: GPU-optimized training with automatic mixed precision
@@ -127,9 +127,9 @@ If you already have the dataset downloaded, ensure it matches the structure abov
    - Run all cells
 
 **Training on cloud GPU:**
-- **Speed:** ~2 hours for 100 epochs (vs. 100+ hours on local 4GB GPU)
-- **Cost:** Free on Colab/Kaggle
-- **Settings:** Automatically uses optimized config with batch_size=16, model_scale=m
+- **Speed:** depends on model scale, image size, and Colab GPU availability
+- **Cost:** Free tiers available on Colab/Kaggle (quota-limited)
+- **Settings:** uses `configs/train_config_cloud.yaml` (default: `model_scale=n`, `batch_size=2`)
 
 📖 **Detailed cloud setup:** See [CLOUD_SETUP.md](CLOUD_SETUP.md) for AWS, Kaggle, Paperspace, etc.
 
@@ -308,9 +308,9 @@ python main.py train --device cpu
 ```
 
 ### Issue: "No data available"
-**Solution**: Download the dataset first
+**Solution**: Ensure VisDrone folders exist under `data/VisDrone`
 ```bash
-python main.py download
+python main.py train --config configs/train_config.yaml
 ```
 
 ### Issue: Import errors
@@ -324,7 +324,7 @@ pip install --upgrade -r requirements.txt
 
 ## Performance Expectations
 
-**Typical Results on VisDrone**:
+**Illustrative Target Range on VisDrone** (depends on split quality, compute budget, and tuning):
 - mAP@0.5: 35-45%
 - mAP@0.5:0.95: 20-30%
 - Small Object mAP: 15-25%
@@ -333,9 +333,11 @@ pip install --upgrade -r requirements.txt
 ## Model Architecture
 
 ### Backbone
-- Enhanced CSPDarknet with deformable convolutions
+- Enhanced CSP-style backbone with high-resolution branch
 - High-resolution branch for small object features
 - Dilated convolutions for larger receptive fields
+
+> Note: `models/modules/` contains additional experimental modules (e.g., deformable/attention) that can be integrated for further ablation studies.
 
 ### Neck (FPN)
 - Multi-scale feature pyramid
@@ -353,9 +355,9 @@ pip install --upgrade -r requirements.txt
 ```bibtex
 @inproceedings{VisDrone2021,
   title = {VisDrone-DET2021: The Vision Meets Drone Object Detection Challenge Results},
-  author = {Naimur Rahman; },
-  booktitle = {working on it},
-  year = {2026}
+  author = {Zhu, Pengfei and others},
+  booktitle = {ICCV},
+  year = {2021}
 }
 ```
 
@@ -386,4 +388,3 @@ For issues, questions, or contributions:
 **Last Updated**: February 2026
 **Python Version**: 3.9+
 **PyTorch Version**: 2.0+
-
