@@ -2,6 +2,7 @@
 batch_size: 2
 epochs: 100
 experiment_name: visdrone_cloud_gpu
+model_label: YOLOv8-SAD-cloud
 grad_clip: 10.0
 lr: 0.0005
 mixed_precision: true
@@ -16,3 +17,19 @@ img_size: 512
 num_workers: 2
 pin_memory: true
 drop_last: true
+
+model_options:
+  use_fpn_fusion: true
+  use_spatial_attention: true
+  use_deformable_branch: true
+
+loss:
+  num_scales: 3
+  scale_area_thresholds: [0.0025, 0.0225]
+  box_weight: 5.0
+  obj_weight: 1.0
+  cls_weight: 1.0
+  small_object_boost: 2.0
+  use_scale_adaptive_assignment: true
+  use_small_object_weighting: true
+  use_tiny_neighbor_supervision: true
