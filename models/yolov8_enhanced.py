@@ -31,15 +31,25 @@ class EnhancedConv(nn.Module):
 
 class SmallObjectDetectionHead(nn.Module):
     """Specialized head for small object detection"""
-    def __init__(self, nc=80, channels=(256, 512, 1024)):
+    def __init__(
+        self,
+        nc=80,
+        channels=(256, 512, 1024),
+        use_fpn_fusion=True,
+        use_spatial_attention=True,
+    ):
         super().__init__()
         self.nc = nc  # number of classes
         self.nl = len(channels)  # number of detection layers
         self.channels = channels
+        self.use_fpn_fusion = use_fpn_fusion
+        self.use_spatial_attention = use_spatial_attention
         
         # Enhanced detection heads with increased capacity for small objects
         self.cls_convs = nn.ModuleList()
         self.reg_convs = nn.ModuleList()
+        self.obj_convs = nn.ModuleList()
+        self.scale_attentions = nn.ModuleList()
         self.cls_preds = nn.ModuleList()
         self.reg_preds = nn.ModuleList()
         
@@ -62,9 +72,19 @@ class SmallObjectDetectionHead(nn.Module):
                 nn.Conv2d(ch, 4 * 4, 1)  # 4 anchors per grid
             )
             self.reg_convs.append(reg_conv)
+
+            # Objectness path
+            obj_conv = nn.Sequential(
+                EnhancedConv(ch, ch, 3),
+                nn.Conv2d(ch, 4 * 1, 1)  # 4 anchors, 1 objectness logit each
+            )
+            self.obj_convs.append(obj_conv)
+
+            # Scale-specific spatial attention refinement
+            self.scale_attentions.append(SpatialPyramidAttention(ch))
         
         # Feature pyramid enhancement
-        self.fpn_fusion = MultiScaleFusionModule(channels)
+        self.fpn_fusion = MultiScaleFusionModule(channels) if self.use_fpn_fusion else nn.Identity()
         
         # Context aggregation module for deepest features
         if len(channels) > 0:
@@ -80,6 +100,10 @@ class SmallObjectDetectionHead(nn.Module):
         
         # Convert to list to allow modification
         features = list(features)
+
+        # Multi-scale feature fusion before prediction
+        if self.use_fpn_fusion:
+            features = self.fpn_fusion(features)
         
         # Context aggregation on deepest features
         if hasattr(self, 'context_module') and len(features) > 0:
@@ -88,7 +112,7 @@ class SmallObjectDetectionHead(nn.Module):
         outputs = []
         num_scales = min(len(features), self.nl)
         for i in range(num_scales):
-            feat = features[i]
+            feat = self.scale_attentions[i](features[i]) if self.use_spatial_attention else features[i]
             expected_ch = self.channels[i]
             if feat.shape[1] != expected_ch:
                 raise ValueError(
@@ -98,13 +122,15 @@ class SmallObjectDetectionHead(nn.Module):
 
             cls_out = self.cls_convs[i](feat)
             reg_out = self.reg_convs[i](feat)
+            obj_out = self.obj_convs[i](feat)
             
             # Reshape outputs
             bs, _, h, w = cls_out.shape
             cls_out = cls_out.view(bs, 4, self.nc, h, w).permute(0, 1, 3, 4, 2)
             reg_out = reg_out.view(bs, 4, 4, h, w).permute(0, 1, 3, 4, 2)
+            obj_out = obj_out.view(bs, 4, 1, h, w).permute(0, 1, 3, 4, 2)
             
-            outputs.append(torch.cat([reg_out, cls_out], dim=-1))
+            outputs.append(torch.cat([reg_out, obj_out, cls_out], dim=-1))
         
         return outputs
 
@@ -148,8 +174,12 @@ class ContextAggregationModule(nn.Module):
 
 class EnhancedYOLOv8(nn.Module):
     """Complete enhanced YOLOv8 architecture for small object detection"""
-    def __init__(self, nc=80, scales='n'):
+    def __init__(self, nc=80, scales='n', model_options=None):
         super().__init__()
+        model_options = model_options or {}
+        use_fpn_fusion = bool(model_options.get('use_fpn_fusion', True))
+        use_spatial_attention = bool(model_options.get('use_spatial_attention', True))
+        use_deformable_branch = bool(model_options.get('use_deformable_branch', True))
         
         # Backbone configuration (ultra-light for 4GB GPU)
         if scales == 'n':
@@ -164,7 +194,10 @@ class EnhancedYOLOv8(nn.Module):
             backbone_channels = [128, 256, 512, 1024, 2048]
         
         # Enhanced backbone
-        self.backbone = EnhancedBackbone(backbone_channels)
+        self.backbone = EnhancedBackbone(
+            backbone_channels,
+            use_deformable_branch=use_deformable_branch,
+        )
         
         # Neck with improved feature pyramid
         self.neck = EnhancedFPN(backbone_channels)
@@ -173,7 +206,12 @@ class EnhancedYOLOv8(nn.Module):
         # EnhancedFPN outputs unified channel width (deepest backbone width) per scale,
         # so head channels should match that width for all three detection scales.
         head_channels = [backbone_channels[-1], backbone_channels[-1], backbone_channels[-1]]
-        self.head = SmallObjectDetectionHead(nc, channels=head_channels)
+        self.head = SmallObjectDetectionHead(
+            nc,
+            channels=head_channels,
+            use_fpn_fusion=use_fpn_fusion,
+            use_spatial_attention=use_spatial_attention,
+        )
         
         # Initialize weights
         self._initialize_weights()
@@ -203,7 +241,7 @@ class EnhancedYOLOv8(nn.Module):
 
 class EnhancedBackbone(nn.Module):
     """Enhanced CSPDarknet backbone with additional small object focus"""
-    def __init__(self, channels):
+    def __init__(self, channels, use_deformable_branch=True):
         super().__init__()
         
         # Initial stem with more aggressive downsampling
@@ -221,7 +259,7 @@ class EnhancedBackbone(nn.Module):
         self.stage4 = EnhancedCSPBlock(channels[3], channels[4], n=3)
         
         # Additional high-resolution branch for small objects
-        self.small_branch = SmallObjectBranch(channels[0])
+        self.small_branch = SmallObjectBranch(channels[0], use_deformable_branch=use_deformable_branch)
         
     def forward(self, x):
         x = self.stem(x)
@@ -239,11 +277,13 @@ class EnhancedBackbone(nn.Module):
 
 class SmallObjectBranch(nn.Module):
     """High-resolution branch specifically for small object features"""
-    def __init__(self, channels):
+    def __init__(self, channels, use_deformable_branch=True):
         super().__init__()
+        self.use_deformable_branch = use_deformable_branch
         self.conv1 = EnhancedConv(channels, channels//2, 1)
         self.conv2 = EnhancedConv(channels//2, channels//2, 3)
         self.conv3 = EnhancedConv(channels//2, channels, 1)
+        self.deform_conv = DeformableConv2d(channels, channels, kernel_size=3, stride=1, padding=1)
         
         # Dilated convolutions for larger receptive field
         self.dilated_conv = nn.Sequential(
@@ -259,6 +299,8 @@ class SmallObjectBranch(nn.Module):
         x = self.conv1(x)
         x = self.conv2(x)
         x = self.conv3(x)
+        if self.use_deformable_branch:
+            x = x + self.deform_conv(x)
         x = x + self.dilated_conv(x)  # Residual connection
         return x
 
