@@ -23,6 +23,72 @@ Research-oriented project for detecting small objects in UAV (drone) imagery usi
 - **Experiment Tracking**: Integration with Weights & Biases (wandb)
 - **Cloud & Local**: Optimized configs for both cloud GPUs and local 4GB GPUs
 
+## Model Novelty
+
+This project focuses on **small-object UAV detection** with a combination of architectural and optimization-level contributions:
+
+1. **Scale-Adaptive Target Assignment (Loss-Level Novelty)**
+   - Ground-truth boxes are assigned to detection scales by normalized area.
+   - Tiny objects receive stronger supervision through scale-aware weighting.
+   - Optional tiny-neighbor supervision improves robustness around small object centers.
+
+2. **Small-Object Specialized Detection Head (Architecture-Level Novelty)**
+   - Dedicated regression, objectness, and classification branches are used per detection scale.
+   - Context aggregation is applied on deep features to improve small-object semantics.
+
+3. **Configurable Multi-Component Enhancement Stack (Ablation-Friendly Design)**
+   - Optional multi-scale fusion, spatial attention, and deformable branch are integrated as toggles.
+   - This enables controlled module-wise ablations for publication-grade analysis.
+
+4. **End-to-End Reproducible Experiment Pipeline**
+   - Built-in ablation runner, comparison report generation, and paper-ready table export.
+   - Designed to support multi-seed evaluation and statistical reporting.
+
+### Novelty Toggles Used in Experiments
+
+- `loss.use_scale_adaptive_assignment`
+- `loss.use_small_object_weighting`
+- `loss.use_tiny_neighbor_supervision`
+- `model_options.use_fpn_fusion`
+- `model_options.use_spatial_attention`
+- `model_options.use_deformable_branch`
+
+These switches are intended to isolate each contribution in ablation studies and quantify individual impact on `mAP@0.5`, `mAP@0.5:0.95`, and `AP_S`.
+
+### Novelty Module Flow (Mermaid)
+
+```mermaid
+flowchart TD
+   A[Input UAV Image] --> B[Enhanced Backbone]
+   B --> B1[Small-Object Branch]
+   B1 --> B2{Deformable Branch\nToggle}
+   B2 -->|on| B3[Deformable Conv + Dilated Conv]
+   B2 -->|off| B4[Dilated Conv Only]
+
+   B --> C[Enhanced FPN]
+   C --> C1{Multi-Scale Fusion\nToggle}
+   C1 -->|on| C2[Fused Multi-Scale Features]
+   C1 -->|off| C3[Raw FPN Features]
+
+   C2 --> D[Small-Object Detection Head]
+   C3 --> D
+   D --> D1{Spatial Attention\nToggle}
+   D1 -->|on| D2[Scale-wise Spatial Attention]
+   D1 -->|off| D3[Direct Head Features]
+
+   D2 --> E[Box + Obj + Class Predictions]
+   D3 --> E
+
+   E --> F[Scale-Adaptive Loss]
+   F --> F1[Scale Assignment by Area]
+   F --> F2[Tiny-Object Weighting]
+   F --> F3[Neighbor Supervision]
+
+   F1 --> G[Optimized Small-Object Detection]
+   F2 --> G
+   F3 --> G
+```
+
 ## Project Structure
 
 ```
