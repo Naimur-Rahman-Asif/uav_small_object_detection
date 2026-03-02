@@ -8,10 +8,12 @@ import numpy as np
 from tqdm import tqdm
 import wandb
 import yaml
+import json
 from pathlib import Path
 import sys
 import cv2
 import os
+from datetime import datetime
 
 # Add parent directory to path for imports
 project_root = Path(__file__).parent.parent.absolute()
@@ -24,7 +26,7 @@ from utils.metrics import evaluate_map
 from experiments.dataset import VisDroneDataset
 
 class UAVTrainer:
-    def __init__(self, config_path='configs/train_config.yaml'):
+    def __init__(self, config_path='configs/train_config.yaml', device_override=None):
         # Handle path for both root and experiments directory execution
         config_file = Path(config_path)
         if not config_file.exists():
@@ -35,8 +37,15 @@ class UAVTrainer:
         with open(config_file, 'r') as f:
             self.config = yaml.safe_load(f)
         
-        # Setup device
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        # Setup device (optional explicit override)
+        if device_override is not None:
+            requested = str(device_override).lower()
+            if requested == 'cuda' and not torch.cuda.is_available():
+                print("Warning: CUDA requested but unavailable. Falling back to CPU.")
+                requested = 'cpu'
+            self.device = torch.device(requested)
+        else:
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.amp_device_type = 'cuda' if self.device.type == 'cuda' else 'cpu'
         
         # Memory optimization for small GPUs (MX250 has 4GB)
@@ -46,15 +55,27 @@ class UAVTrainer:
             os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
         
         # Initialize model
+        model_options = self.config.get('model_options', {})
         self.model = EnhancedYOLOv8(
             nc=self.config['num_classes'],
-            scales=self.config['model_scale']
+            scales=self.config['model_scale'],
+            model_options=model_options,
         ).to(self.device)
         
         # Custom loss function for small objects
+        loss_cfg = self.config.get('loss', {})
         self.criterion = EnhancedLoss(
             nc=self.config['num_classes'],
-            device=self.device
+            device=self.device,
+            num_scales=loss_cfg.get('num_scales', 3),
+            scale_area_thresholds=tuple(loss_cfg.get('scale_area_thresholds', [0.0025, 0.0225])),
+            box_weight=loss_cfg.get('box_weight', 5.0),
+            obj_weight=loss_cfg.get('obj_weight', 1.0),
+            cls_weight=loss_cfg.get('cls_weight', 1.0),
+            small_object_boost=loss_cfg.get('small_object_boost', 2.0),
+            use_scale_adaptive_assignment=loss_cfg.get('use_scale_adaptive_assignment', True),
+            use_small_object_weighting=loss_cfg.get('use_small_object_weighting', True),
+            use_tiny_neighbor_supervision=loss_cfg.get('use_tiny_neighbor_supervision', True),
         )
         
         # Optimizer with weight decay
@@ -207,27 +228,35 @@ class UAVTrainer:
 
                 # Filter by confidence
                 if output_reshaped.shape[1] > 4:
-                    conf = torch.sigmoid(output_reshaped[:, 4])
-                    mask = conf > conf_threshold
+                    obj_conf = torch.sigmoid(output_reshaped[:, 4])
+                    mask = obj_conf > conf_threshold
 
                     if mask.sum() > 0:
                         filtered = output_reshaped[mask]
 
                         # Convert to [x1, y1, x2, y2, conf, class]
                         for det in filtered:
-                            bbox = det[:4].sigmoid() * 640  # Scale to 640
+                            bbox = torch.sigmoid(det[:4]).clamp(0.0, 1.0)
+                            x1, y1, x2, y2 = bbox.tolist()
+                            if x2 < x1:
+                                x1, x2 = x2, x1
+                            if y2 < y1:
+                                y1, y2 = y2, y1
+
                             conf_val = torch.sigmoid(det[4])
 
                             if det.shape[0] > 5:
                                 cls_conf = torch.softmax(det[5:], dim=0)
                                 cls_idx = cls_conf.argmax()
+                                final_conf = conf_val * cls_conf[cls_idx]
                             else:
                                 cls_idx = 0
+                                final_conf = conf_val
 
                             img_preds.append([
-                                bbox[0].item(), bbox[1].item(),
-                                bbox[2].item(), bbox[3].item(),
-                                conf_val.item(), cls_idx.item()
+                                x1, y1,
+                                x2, y2,
+                                final_conf.item(), int(cls_idx.item())
                             ])
 
                 batch_preds.append(img_preds)
@@ -265,11 +294,18 @@ class UAVTrainer:
         """Specialized evaluation for small objects"""
         small_preds = []
         small_gts = []
+        threshold_area = (threshold / 640.0) ** 2
         
         for preds, gts in zip(predictions, ground_truths):
-            # Filter small objects (based on pixel area)
-            small_pred = [p for p in preds if (p[3] * p[4]) * 640 * 640 < threshold * threshold]
-            small_gt = [g for g in gts if (g[3] * g[4]) * 640 * 640 < threshold * threshold]
+            # Filter small objects by normalized bbox area
+            small_pred = [
+                p for p in preds
+                if len(p) >= 4 and max(0.0, p[2] - p[0]) * max(0.0, p[3] - p[1]) < threshold_area
+            ]
+            small_gt = [
+                g for g in gts
+                if len(g) >= 4 and max(0.0, g[2] - g[0]) * max(0.0, g[3] - g[1]) < threshold_area
+            ]
             
             small_preds.append(small_pred)
             small_gts.append(small_gt)
@@ -287,6 +323,15 @@ class UAVTrainer:
     def train(self, train_loader, val_loader):
         """Complete training pipeline"""
         best_map = 0
+        best_epoch = -1
+        best_metrics = {
+            'map_50': 0.0,
+            'map_50_95': 0.0,
+            'ap_small': 0.0,
+            'precision': 0.0,
+            'recall': 0.0,
+            'small_map_50_95': 0.0,
+        }
         
         for epoch in range(self.config['epochs']):
             # Training
@@ -299,6 +344,15 @@ class UAVTrainer:
                 # Save best model
                 if metrics['map_50_95'] > best_map:
                     best_map = metrics['map_50_95']
+                    best_epoch = epoch
+                    best_metrics.update({
+                        'map_50': metrics.get('map_50', 0.0),
+                        'map_50_95': metrics.get('map_50_95', 0.0),
+                        'ap_small': metrics.get('ap_small', 0.0),
+                        'precision': metrics.get('precision', 0.0),
+                        'recall': metrics.get('recall', 0.0),
+                        'small_map_50_95': metrics.get('small_map_50_95', 0.0),
+                    })
                     
                     # Ensure weights directory exists
                     weights_dir = Path('..') / 'weights' if not Path('weights').exists() else Path('weights')
@@ -332,6 +386,40 @@ class UAVTrainer:
             self.scheduler.step()
         
         print(f"Training completed. Best mAP: {best_map:.4f}")
+        self._save_run_summary(best_epoch, best_metrics)
+
+    def _save_run_summary(self, best_epoch, best_metrics):
+        """Save run metrics as JSON for comparison/ablation scripts."""
+        runs_dir = Path('results') / 'runs'
+        if not runs_dir.exists() and (Path('..') / 'results').exists():
+            runs_dir = Path('..') / 'results' / 'runs'
+        runs_dir.mkdir(parents=True, exist_ok=True)
+
+        experiment_name = self.config.get('experiment_name', 'unnamed_experiment')
+        model_label = self.config.get('model_label', experiment_name)
+        run_id = datetime.now().strftime('%Y%m%d_%H%M%S')
+
+        summary = {
+            'model': model_label,
+            'experiment_name': experiment_name,
+            'seed': self.config.get('seed', -1),
+            'epoch': int(best_epoch),
+            'map_50': float(best_metrics.get('map_50', 0.0)),
+            'map_50_95': float(best_metrics.get('map_50_95', 0.0)),
+            'ap_small': float(best_metrics.get('ap_small', 0.0)),
+            'small_map_50_95': float(best_metrics.get('small_map_50_95', 0.0)),
+            'precision': float(best_metrics.get('precision', 0.0)),
+            'recall': float(best_metrics.get('recall', 0.0)),
+            'parameters': int(sum(p.numel() for p in self.model.parameters())),
+            'inference_fps': float(self.config.get('inference_fps', 0.0)),
+            'gflops': float(self.config.get('gflops', 0.0)),
+            'timestamp': run_id,
+        }
+
+        output_file = runs_dir / f"{experiment_name}_{run_id}.json"
+        with open(output_file, 'w', encoding='utf-8') as f:
+            json.dump(summary, f, indent=2)
+        print(f"Saved run summary: {output_file}")
 
 if __name__ == '__main__':
     # Configuration
@@ -347,7 +435,18 @@ if __name__ == '__main__':
         'mixed_precision': True,
         'grad_clip': 10.0,
         'val_interval': 5,
-        'use_wandb': False  # Disable wandb by default to avoid auth issues
+        'use_wandb': False,  # Disable wandb by default to avoid auth issues
+        'loss': {
+            'num_scales': 3,
+            'scale_area_thresholds': [0.0025, 0.0225],
+            'box_weight': 5.0,
+            'obj_weight': 1.0,
+            'cls_weight': 1.0,
+            'small_object_boost': 2.0,
+            'use_scale_adaptive_assignment': True,
+            'use_small_object_weighting': True,
+            'use_tiny_neighbor_supervision': True,
+        },
     }
     
     # Save config (handle path for both root and experiments directory execution)

@@ -8,6 +8,7 @@ import yaml
 from pathlib import Path
 import sys
 import argparse
+from experiments.dataset import VisDroneDataset
 
 sys.path.append('..')
 
@@ -94,27 +95,34 @@ class Validator:
                 
                 # Filter by confidence
                 if output_reshaped.shape[1] > 4:
-                    conf = torch.sigmoid(output_reshaped[:, 4])
-                    mask = conf > conf_threshold
+                    obj_conf = torch.sigmoid(output_reshaped[:, 4])
+                    mask = obj_conf > conf_threshold
                     
                     if mask.sum() > 0:
                         filtered = output_reshaped[mask]
                         
                         # Convert to [x1, y1, x2, y2, conf, class]
                         for det in filtered:
-                            bbox = det[:4].sigmoid() * 640  # Scale to 640
+                            bbox = torch.sigmoid(det[:4]).clamp(0.0, 1.0)
+                            x1, y1, x2, y2 = bbox.tolist()
+                            if x2 < x1:
+                                x1, x2 = x2, x1
+                            if y2 < y1:
+                                y1, y2 = y2, y1
                             conf_val = torch.sigmoid(det[4])
                             
                             if det.shape[0] > 5:
                                 cls_conf = torch.softmax(det[5:], dim=0)
                                 cls_idx = cls_conf.argmax()
+                                final_conf = conf_val * cls_conf[cls_idx]
                             else:
                                 cls_idx = 0
+                                final_conf = conf_val
                             
                             img_preds.append([
-                                bbox[0].item(), bbox[1].item(),
-                                bbox[2].item(), bbox[3].item(),
-                                conf_val.item(), cls_idx.item()
+                                x1, y1,
+                                x2, y2,
+                                final_conf.item(), int(cls_idx.item())
                             ])
                 
                 batch_preds.append(img_preds)
@@ -133,16 +141,42 @@ def main():
     args = parser.parse_args()
     
     # Initialize validator
-    validator = Validator(model_path=args.model, device=args.device)
-    
-    # Create dummy dataloader (since we don't have actual data)
-    from torch.utils.data import TensorDataset
-    dummy_images = torch.randn(16, 3, 640, 640)
-    dummy_targets = [[] for _ in range(16)]
-    
-    dataset = TensorDataset(dummy_images)
-    val_loader = DataLoader(dataset, batch_size=args.batch_size)
-    
+    validator = Validator(model_path=args.model, config_path='configs/train_config.yaml', device=args.device)
+
+    # Build real VisDrone validation loader
+    data_root = Path('..') / 'data' if not Path('data').exists() else Path('data')
+    img_size = validator.config.get('img_size', 640)
+    num_workers = validator.config.get('num_workers', 0)
+    pin_memory = bool(validator.config.get('pin_memory', False) and torch.cuda.is_available())
+
+    val_images = data_root / 'VisDrone' / 'val' / 'images'
+    val_annotations = data_root / 'VisDrone' / 'val' / 'annotations'
+
+    if not val_images.exists() or not val_annotations.exists():
+        raise FileNotFoundError(
+            f"Validation dataset not found. Expected: {val_images} and {val_annotations}"
+        )
+
+    val_dataset = VisDroneDataset(str(val_images), str(val_annotations), img_size=img_size)
+
+    def collate_fn(batch):
+        images, targets = zip(*batch)
+        images = torch.stack(images)
+        return images, list(targets)
+
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        persistent_workers=num_workers > 0,
+        collate_fn=collate_fn,
+    )
+
+    if len(val_loader) == 0:
+        raise RuntimeError("Validation loader is empty. Check dataset files under data/VisDrone/val.")
+
     # Validate
     metrics = validator.validate(val_loader)
     

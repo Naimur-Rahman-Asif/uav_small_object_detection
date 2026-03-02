@@ -120,12 +120,33 @@ class Tester:
                 
                 # Filter by confidence
                 if output_reshaped.shape[1] > 4:
-                    conf = torch.sigmoid(output_reshaped[:, 4:5])
-                    mask = (conf.squeeze() > conf_threshold)
+                    obj_conf = torch.sigmoid(output_reshaped[:, 4])
+                    mask = (obj_conf > conf_threshold)
                     
                     if mask.sum() > 0:
                         filtered_output = output_reshaped[mask]
-                        img_preds = filtered_output.cpu().numpy().tolist()
+                        for det in filtered_output:
+                            bbox = torch.sigmoid(det[:4]).clamp(0.0, 1.0)
+                            x1, y1, x2, y2 = bbox.tolist()
+                            if x2 < x1:
+                                x1, x2 = x2, x1
+                            if y2 < y1:
+                                y1, y2 = y2, y1
+
+                            conf_val = torch.sigmoid(det[4])
+                            if det.shape[0] > 5:
+                                cls_conf = torch.softmax(det[5:], dim=0)
+                                cls_idx = cls_conf.argmax()
+                                final_conf = conf_val * cls_conf[cls_idx]
+                            else:
+                                cls_idx = 0
+                                final_conf = conf_val
+
+                            img_preds.append([
+                                x1, y1,
+                                x2, y2,
+                                final_conf.item(), int(cls_idx.item())
+                            ])
                 
                 batch_preds.append(img_preds)
             
